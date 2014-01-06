@@ -1,0 +1,17 @@
+<?php // vim: ft=php
+//function email_validator_install()/*{{{*/
+/** Implements hook_install
+ */
+function email_validator_install()
+{
+    $default_email = variable_get('site_mail', ini_get('sendmail_from'));
+    variable_set('email_validator_returnpath',$default_email);
+    drupal_set_message("Please <a href='/admin/email-validator' >configure the Email validator module</a>", 'warning');
+}/*}}}*/
+//function email_validator_uninstall()/*{{{*/
+/** Implements hook_uninstall
+ */
+function email_validator_uninstall()
+{
+    variable_del('email_validator_returnpath');
+}/*}}}*/

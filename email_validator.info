@@ -1,0 +1,8 @@
+name = Email Validator API
+description = "Provides SMTP validity checks on an email"
+package = "Artful Robot"
+core = 7.x
+
+files[] = email_validator.module
+files[] = email_validator.install
+
