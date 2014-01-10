@@ -275,20 +275,35 @@ function email_validator_result($mail, $host, $code) {
 }//}}}
 // function email_validator_flood() {{{
 /**
- * Detects flood
+ * Detects flood, currently configged at 3/day max.
+ *
+ * Behaviours to catch
+ *
+ * 1. fast-paced abuse, lots of tests quickly
+ * 2. timed abuse, e.g. 4/day at regular intervals
+ * 3. history of abuse in last month.
+ *
+ * (1, 2) are dealt with together: allowed 3 new lookups per day
+ * 3 is dealt with on the ratio of failure to success.
  *
  * @return bool true for flood detected
  */
 function email_validator_flood() {
 
-  $flood = db_query('SELECT COUNT(*) FROM email_validator_cache e '
-        . 'WHERE ip = :ip AND e.when > :when',
+  $flood = db_query(
+        'SELECT SUM(e.when > :in_last_day)>3 OR
+                ( SUM(e.result>0) > 0
+                  AND ( SUM(e.result=0)/SUM(e.result>0)<0.3 ) )
+                AS deny
+        FROM email_validator_cache e
+        WHERE ip = :ip AND e.when > :in_last_month',
     array(
         ':ip' => $_SERVER['REMOTE_ADDR'],
-        ':when' => time() - 1800, // 30 mins.
+        ':in_last_day' => time() - 60*60*24, // 1 day
+        ':in_last_month' => time() - 60*60*24*30, // 1 month(ish)
     ))
     ->fetchField();
-  if ($flood>2) {
+  if ($flood=="1") {
      // flood detected
      watchdog('email_validator', "IP $_SERVER[REMOTE_ADDR] exceeded flood limit");
      return true;
