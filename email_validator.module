@@ -284,7 +284,8 @@ function email_validator_result($mail, $host, $code) {
  * 3. history of abuse in last month.
  *
  * (1, 2) are dealt with together: allowed 3 new lookups per day
- * 3 is dealt with on the ratio of failure to success.
+ * 3 is used only when there have been more than 5 lookups in last month AND
+ * less than 30% of them have been successful.
  *
  * @return bool true for flood detected
  */
@@ -292,8 +293,8 @@ function email_validator_flood() {
 
   $flood = db_query(
         'SELECT SUM(e.when > :in_last_day)>3 OR
-                ( SUM(e.result>0) > 0
-                  AND ( SUM(e.result=0)/SUM(e.result>0)<0.3 ) )
+                ( COUNT(e.result) > 5
+                  AND ( (SUM(e.result=0)/COUNT(e.result))<0.3 ) )
                 AS deny
         FROM email_validator_cache e
         WHERE ip = :ip AND e.when > :in_last_month',
