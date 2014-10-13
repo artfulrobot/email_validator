@@ -8,7 +8,7 @@
  */
 
 // Drupal hooks
-//function email_validator_menu()/*{{{*/
+
 /**
  * Implements hook_menu
  *
@@ -22,8 +22,8 @@ function email_validator_menu()
             'type' => MENU_CALLBACK,
             );
     return $items;
-}/*}}}*/
-function email_validator_permission()/*{{{*/
+}
+function email_validator_permission()
 {
 	return array(
 			'administer email_validator' => array(
@@ -31,8 +31,8 @@ function email_validator_permission()/*{{{*/
 				'description' => t('Set return path for SMTP conversations'),
 				),
 			);
-}/*}}}*/
-//function email_validator_schema()/*{{{*/
+}
+
 /**
  * Implements hook_schema
  */
@@ -87,10 +87,10 @@ function email_validator_schema()
     );
 
     return $schema;
-}/*}}}*/
+}
 
 // Forms
-//function email_validator_admin_form()/*{{{*/
+
 /**
  * Admin form
  */
@@ -106,10 +106,9 @@ function email_validator_admin_form()
             ),
         );
     return system_settings_form($form);
-}/*}}}*/
+}
 
-// Main API function
-// function email_validator_check($mail) {{{
+
 /**
  * This function a modified version of the email_validator module's:
  * 	Verifies thoroughly that email addresses are correctly entered
@@ -144,7 +143,7 @@ function email_validator_check($mail) {
   }
 
   // are we banned?
-  if (email_validator_flood()) {
+  if (email_validator_flood($mail)) {
     return t('Sorry, there have been too many invalid email addresses tried from your IP address.');
   }
 
@@ -229,10 +228,11 @@ function email_validator_check($mail) {
 
   // Everything is OK, so record success.
   return email_validator_result($mail,$host, 0);
-}//}}}
+}
+
 
 // Utility functions
-// function email_validator_code_translate($code, $mail) {{{
+
 /**
  * @return error string, or null (no error)
  */
@@ -254,8 +254,8 @@ function email_validator_code_translate($code, $mail, $host) {
     default:
         return;
   }
-}//}}}
-// function email_validator_result($code, $mail) {{{
+}
+
 /**
  * Store result
  */
@@ -272,8 +272,8 @@ function email_validator_result($mail, $host, $code) {
 
     return email_validator_code_translate($code, $mail, $host);
 
-}//}}}
-// function email_validator_flood() {{{
+}
+
 /**
  * Detects flood, currently configged at 3/day max.
  *
@@ -289,7 +289,7 @@ function email_validator_result($mail, $host, $code) {
  *
  * @return bool true for flood detected
  */
-function email_validator_flood() {
+function email_validator_flood($mail) {
 
   $flood = db_query(
         'SELECT SUM(e.when > :in_last_day)>3 OR
@@ -306,8 +306,10 @@ function email_validator_flood() {
     ->fetchField();
   if ($flood=="1") {
      // flood detected
-     watchdog('email_validator', "IP $_SERVER[REMOTE_ADDR] exceeded flood limit");
+     watchdog('email_validator', "IP @ip exceeded flood limit. @mail denied.",
+        array('@ip'=>$_SERVER['REMOTE_ADDR'],
+              '@mail' => $mail ));
      return true;
   }
  return false;
-}//}}}
+}
