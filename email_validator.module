@@ -154,12 +154,20 @@ function email_validator_check($mail) {
     $mx_hosts[] = $host;
   }
 
+  // Some of these may be multiple IPs - we'd need to test them all. Make a unique list.
+  $mx_ips = array();
+  foreach ($mx_hosts as $hostname) {
+    foreach (gethostbynamel($hostname) as $ip) {
+      $mx_ips[$ip] = $hostname;
+  } }
+
   // Try to connect to one SMTP server.
-  foreach ($mx_hosts as $smtp) {
+  foreach ($mx_ips as $smtp=>$hostname) {
 
     $connect = @fsockopen($smtp, 25, $errno, $errstr, 15);
 
     if (!$connect) {
+      error_log("Failed to connect to $smtp<-$hostname<-$host  (error: $errno: $errstr)");
       continue;
     }
 
@@ -177,6 +185,7 @@ function email_validator_check($mail) {
   }
 
   if (!$connect) {
+    error_log("Failed to connect to any MX for $mail");
     return email_validator_result($mail,$host, 3);
   }
 
