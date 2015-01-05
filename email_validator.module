@@ -15,13 +15,19 @@
  */
 function email_validator_menu()
 {
-    $items['admin/email-validator'] = array(
-            'page callback' => 'drupal_get_form',
-            'page arguments'  => array('email_validator_admin_form'),
-            'access arguments'  => array('administer email_validator'),
-            'type' => MENU_CALLBACK,
-            );
-    return $items;
+  $items['admin/config/email-validator'] = array(
+    'title' => 'Configure Email Validator',
+    'page callback' => 'drupal_get_form',
+    'page arguments'  => array('email_validator_admin_form'),
+    'access arguments'  => array('administer email_validator'),
+  );
+  $items['admin/reports/email-validator'] = array(
+    'title' => 'Email Validator',
+    'page callback' => 'drupal_get_form',
+    'page arguments'  => array('email_validator_debug_form'),
+    'access arguments'  => array('administer email_validator'),
+  );
+  return $items;
 }
 function email_validator_permission()
 {
@@ -117,42 +123,59 @@ function email_validator_admin_form()
  *
  * @return error string, or null (no error)
  */
-function email_validator_check($mail) {
+function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
+  $debug_log = array();
 
   if (!valid_email_address($mail)) {
     // The address is syntactically incorrect.
-    return t('Email address %mail is invalid', array('%mail'=>$mail));
+    $debug_log[] = "$mail failed valid_email_address test";
+    $debug_log[] = $msg = t('Email address %mail is invalid', array('%mail'=>$mail));
+    return $msg;
   }
 
   $host = drupal_substr(strchr($mail, '@'), 1);
 
-  // first check if we've looked this up recently.
-  $result = db_query('SELECT result FROM {email_validator_cache} e '
-            .'WHERE e.email = :email AND e.{when} > :when',
-         array(
-            ':email' => $mail,
-            ':when' => time() - 60*60*24, // last day
-         ))->fetchField();
-  if ($result !== false) {
-    return email_validator_code_translate($result, $mail, $host);
+  if ($use_cache) {
+    // first check if we've looked this up recently.
+    $result = db_query('SELECT result FROM {email_validator_cache} e '
+              .'WHERE e.email = :email AND e.{when} > :when',
+           array(
+              ':email' => $mail,
+              ':when' => time() - 60*60*24, // last day
+           ))->fetchField();
+    if ($result !== false) {
+      $debug_log[] = "Returning from cache: result $result";
+      $debug_log[] = $msg = email_validator_code_translate($result, $mail, $host);
+      return $msg;
+    }
+    $debug_log[] = "Not in cache";
+  }
+  else {
+    $debug_log[] = "Cache not consulted";
   }
 
   // Let's see if we can find anything about this host in the DNS.
   if (!checkdnsrr($host, 'ANY')) {
-    return email_validator_result($mail,$host, 2);
+    $debug_log[] = "checkdnsrr ANY failed for host '$host'";
+    $debug_log[] = $msg = email_validator_result($mail,$host, 2);
+    return $msg;
   }
+  $debug_log[] = "checkdnsrr ANY success";
 
   // are we banned?
   if (email_validator_flood($mail)) {
-    return t('Sorry, there have been too many invalid email addresses tried from your IP address.');
+    $debug_log[] = $msg = t('Sorry, there have been too many invalid email addresses tried from your IP address.');
+    return $msg;
   }
 
   // What SMTP servers should we contact?
   $mx_hosts = array();
   if (!getmxrr($host, $mx_hosts)) {
+    $debug_log[] = "getmxrr failed for '$host' - will use '$host'";
     // When there is no MX record, the host itself should be used.
     $mx_hosts[] = $host;
   }
+  $debug_log[] = "MX hosts found: " . implode(", ", $mx_hosts);
 
   // Some of these may be multiple IPs - we'd need to test them all. Make a unique list.
   $mx_ips = array();
@@ -163,30 +186,36 @@ function email_validator_check($mail) {
 
   // Try to connect to one SMTP server.
   foreach ($mx_ips as $smtp=>$hostname) {
+    $debug_log[] = "Trying MX $smtp for $hostname";
 
     $connect = @fsockopen($smtp, 25, $errno, $errstr, 15);
 
     if (!$connect) {
-      error_log("Failed to connect to $smtp<-$hostname<-$host  (error: $errno: $errstr)");
+      $debug_log[] = "...failed to connect to $smtp<-$hostname<-$host  (error: $errno: $errstr)";
       continue;
     }
 
     if (preg_match("/^220/", $out = fgets($connect, 1024))) {
+      $debug_log[] = "...successful connection, will continue with this MX";
       // OK, we have a SMTP connection.
       break;
     }
     else {
+      $debug_log[] = "...connection was not allowed: $out";
       // The SMTP server probably does not like us
       // (dynamic/residential IP for aol.com for instance)
       // Be on the safe side and accept the address, at least it has a valid
       // domain part...
-      return email_validator_result($mail,$host, 1);
+      // $debug_log[] = $msg = email_validator_result($mail,$host, 1);
+      // return $msg;
+      $connect = FALSE;
     }
   }
 
   if (!$connect) {
-    error_log("Failed to connect to any MX for $mail");
-    return email_validator_result($mail,$host, 3);
+    $debug_log[] = "Failed to connect to any MX for $mail";
+    $debug_log[] = $msg = email_validator_result($mail,$host, 3);
+    return $msg;
   }
 
   $from = variable_get('email_validator_returnpath',
@@ -195,12 +224,14 @@ function email_validator_check($mail) {
   if (preg_match('/\<(.*)\>/', $from, $match) > 0) {
     $from = $match[1];
   }
+  $debug_log[] = "Using <$from> for returnpath";
 
   // Should be good enough for RFC compliant SMTP servers.
   $localhost = $_SERVER["HTTP_HOST"];
   if (!$localhost) {
     $localhost = 'localhost';
   }
+  $debug_log[] = "Using $localhost for HELO";
 
   fputs($connect, "HELO $localhost\r\n");
   $out = fgets($connect, 1024);
@@ -215,7 +246,9 @@ function email_validator_check($mail) {
     // Again, something went wrong before we could really test the address.
     // Be on the safe side and accept it.
     watchdog('email_validator', "Could not verify email address at host $host: $from (but accepted from user's POV)");
-    return email_validator_result($mail,$host, 5);
+    $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got $from";
+    $debug_log[] = $msg = email_validator_result($mail,$host, 5);
+    return $msg;
   }
 
   if (
@@ -226,17 +259,89 @@ function email_validator_check($mail) {
       // taken: mailbox unavailable".
       preg_match("/^4/", $to) && !preg_match("/^450/", $to)) {
       // In those cases, accept the email, but log a warning.
+      $debug_log[] = "MAIL TO failed. (still accept). Got: $to";
       watchdog('email_validator', "Could not verify email address at host $host: $to (but accepted from user's POV)");
-      return email_validator_result($mail,$host, 6);
+      $debug_log[] = $msg = email_validator_result($mail,$host, 6);
+      return $msg;
   }
 
   if (!preg_match("/^250/", $to)) {
     watchdog('email_validator', "Rejected email address: $mail. Reason: $to");
-    return email_validator_result($mail,$host, 4);
+    $debug_log[] = "MAIL TO did not give success (250) code. Instead got $to";
+    $debug_log[] = $msg = email_validator_result($mail,$host, 4);
+    return $msg;
   }
 
   // Everything is OK, so record success.
-  return email_validator_result($mail,$host, 0);
+  $debug_log[] = "SUCCESS.";
+  $debug_log[] = $msg = email_validator_result($mail,$host, 0);
+  return $msg;
+}
+
+
+/**
+ * Debug form
+ */
+function email_validator_debug_form() {
+  drupal_set_title("Email Validator Test email address");
+  $form = array(
+    'test_email' => array(
+      '#type' => 'textfield',
+      '#title' => t('Enter email address to test. No mail will actually be sent.'),
+      '#default_value' => '',
+    ),
+    'cache' => array(
+      '#type' => 'checkbox',
+      '#title' => 'Do not use cache',
+      '#default_value' => 1,
+    ),
+    'cache_clear' => array(
+      '#type' => 'textfield',
+      '#title' => 'Clear cache for emails with this substring. Use * for full cache clear(!)',
+      '#default_value' => '',
+    ),
+    'submit' => array(
+      '#type' => 'submit',
+      '#value' => 'Test',
+    ),
+  );
+  return $form;
+}
+/**
+ * Check the given email
+ */
+function email_validator_debug_form_validate($form, &$form_state) {
+
+  $match = trim($form_state['values']['cache_clear']);
+  if ($match) {
+    // we need to clear the cache.
+
+    $del = db_delete('email_validator_cache');
+
+    if ($match != '*') {
+      $del->condition('email', "%$match%", "LIKE");
+    }
+    $del->execute();
+    drupal_set_message("Cleared cache for all emails matching " . htmlspecialchars($match));
+  }
+  if ($form_state['values']['test_email']) {
+    $result = email_validator_check($form_state['values']['test_email'], $log, ! (bool) $form_state['values']['cache']);
+
+    $log = "<pre>" . htmlspecialchars(implode("\n", $log)) . "</pre>";
+
+    if ($result) {
+      form_set_error("test_email", $log);
+    }
+    else {
+      drupal_set_message("Accepted.<br />$log");
+    }
+  }
+}
+/**
+ * Check the given email
+ */
+function email_validator_debug_form_submit($form, &$form_state) {
+  $form_state['redirect'] = false;
 }
 
 
