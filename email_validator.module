@@ -110,7 +110,17 @@ function email_validator_admin_form()
             '#default_value' => variable_get('email_validator_returnpath',
                 variable_get('site_mail', ini_get('sendmail_from'))),
             ),
-        );
+        'email_validator_flood_today' => [
+          '#type' => 'textfield',
+          '#title' => t('How many failed attempts in one day before we ban the IP address? Suggestion: 3'),
+          '#default_value' => variable_get('email_validator_flood_today',3),
+        ],
+        'email_validator_flood_this_month' => [
+          '#type' => 'textfield',
+          '#title' => t('How many failed attempts in one month before we ban the IP address? Suggestion: 10'),
+          '#default_value' => variable_get('email_validator_flood_month',10),
+        ],
+    );
     return system_settings_form($form);
 }
 
@@ -295,9 +305,20 @@ function email_validator_debug_form() {
       '#title' => 'Do not use cache',
       '#default_value' => 1,
     ),
+    'summary' => array(
+      '#type' => 'checkbox',
+      '#title' => 'Show summary for matching emails',
+      '#default_value' => 1,
+    ),
     'cache_clear' => array(
       '#type' => 'textfield',
       '#title' => 'Clear cache for emails with this substring. Use * for full cache clear(!)',
+      '#default_value' => '',
+    ),
+    'test_ip' => array(
+      '#type' => 'textfield',
+      '#description' => "Nb. your IP address is $_SERVER[REMOTE_ADDR]",
+      '#title' => 'Check a certain IP address',
       '#default_value' => '',
     ),
     'submit' => array(
@@ -312,10 +333,16 @@ function email_validator_debug_form() {
  */
 function email_validator_debug_form_validate($form, &$form_state) {
 
+}
+/**
+ * Check the given email
+ */
+function email_validator_debug_form_submit($form, &$form_state) {
+  $form_state['redirect'] = false;
+
   $match = trim($form_state['values']['cache_clear']);
   if ($match) {
     // we need to clear the cache.
-
     $del = db_delete('email_validator_cache');
 
     if ($match != '*') {
@@ -324,9 +351,15 @@ function email_validator_debug_form_validate($form, &$form_state) {
     $del->execute();
     drupal_set_message("Cleared cache for all emails matching " . htmlspecialchars($match));
   }
-  if ($form_state['values']['test_email']) {
-    $result = email_validator_check($form_state['values']['test_email'], $log, ! (bool) $form_state['values']['cache']);
 
+  $ips = [];
+  if ($form_state['values']['test_email']) {
+    // We have an email
+    $mail = $form_state['values']['test_email'];
+    $host = drupal_substr(strchr($mail, '@'), 1);
+
+    // First, run the tests.
+    $result = email_validator_check($form_state['values']['test_email'], $log, ! (bool) $form_state['values']['cache']);
     $log = "<pre>" . htmlspecialchars(implode("\n", $log)) . "</pre>";
 
     if ($result) {
@@ -335,13 +368,55 @@ function email_validator_debug_form_validate($form, &$form_state) {
     else {
       drupal_set_message("Accepted.<br />$log");
     }
+
+    // perform ip analysis.
+    // Look up ip(s) matching the given address, then add a report for each IP.
+    $result = db_query('SELECT * FROM {email_validator_cache} e WHERE e.email = :email',
+      [ ':email' => $form_state['values']['test_email'] ]);
+
+    $table = ['header' => ['Date', 'IP', 'Result'], 'rows' => []];
+    while ($row = $result->fetchAssoc()) {
+      $ips[$row['ip']] = 1;
+      $line = email_validator_code_translate($row['result'], $mail, $host);
+      if ($line === null) {
+        $line = "OK (code $row[result])";
+      }
+      $table['rows'][] = [ date('j M Y H:i:s', $row['when']), $row['ip'], $line ];
+    }
+    $ips = array_keys($ips);
+    $table=theme('table', $table);
+    drupal_set_message("Cache table for " . $form_state['values']['test_email'] . ":\n" . $table);
   }
-}
-/**
- * Check the given email
- */
-function email_validator_debug_form_submit($form, &$form_state) {
-  $form_state['redirect'] = false;
+
+  if (!empty($form_state['values']['test_ip'])) {
+    $ips [] = $form_state['values']['test_ip'];
+  }
+
+  if ($ips) {
+    $too_many_today = (int) variable_get('email_validator_flood_today',3);
+    $too_many_this_month = (int) variable_get('email_validator_flood_month',10);
+    $table = ['header' => ['IP address', "Failures today (allowed $too_many_today)", "Failures last month (allowed $too_many_this_month)", 'Lookups last month'], 'rows'=> []];
+    $failed_attempts = 'e.result IN (1,2,3,4)';
+    foreach ($ips as $ip) {
+
+      $flood = db_query(
+        "SELECT SUM(e.when > :in_last_day AND $failed_attempts ) AS failures_today,
+        SUM($failed_attempts) AS failures_last_month,
+        COUNT(ip) AS lookups_last_month
+        FROM email_validator_cache e
+        WHERE ip = :ip AND e.when > :in_last_month",
+        array(
+          ':ip' => $ip,
+          ':in_last_day' => time() - 60*60*24, // 1 day
+          ':in_last_month' => time() - 60*60*24*30, // 1 month(ish)
+        ))->fetchAssoc();
+
+      $table['rows'][] = [$ip, (int)$flood['failures_today'], (int)$flood['failures_last_month'], (int)$flood['lookups_last_month'] ];
+    }
+    $table = "<h3>IP flood report</h3>" . theme('table', $table);
+    drupal_set_message($table);
+
+  }
 }
 
 
@@ -397,21 +472,23 @@ function email_validator_result($mail, $host, $code) {
  * 2. timed abuse, e.g. 4/day at regular intervals
  * 3. history of abuse in last month.
  *
- * (1, 2) are dealt with together: allowed 3 new lookups per day
- * 3 is used only when there have been more than 5 lookups in last month AND
- * less than 30% of them have been successful.
+ * (1, 2) are dealt with together: allowed 3 failed attempts in one day
+ * (3) is done as over 10 failed attempts in the last month.
  *
  * @return bool true for flood detected
  */
 function email_validator_flood($mail) {
 
+  $failed_attempts = 'e.result IN (1,2,3,4)';
+  $ok_attempts = 'e.result IN (0,5,6)';
+  $too_many_today = (int) variable_get('email_validator_flood_today',3);
+  $too_many_this_month = (int) variable_get('email_validator_flood_month',10);
   $flood = db_query(
-        'SELECT SUM(e.when > :in_last_day)>3 OR
-                ( COUNT(e.result) > 5
-                  AND ( (SUM(e.result=0)/COUNT(e.result))<0.3 ) )
+        "SELECT SUM(e.when > :in_last_day AND $failed_attempts )>$too_many_today OR
+                SUM($failed_attempts) > $too_many_this_month
                 AS deny
         FROM email_validator_cache e
-        WHERE ip = :ip AND e.when > :in_last_month',
+        WHERE ip = :ip AND e.when > :in_last_month",
     array(
         ':ip' => $_SERVER['REMOTE_ADDR'],
         ':in_last_day' => time() - 60*60*24, // 1 day
