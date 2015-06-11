@@ -297,17 +297,12 @@ function email_validator_debug_form() {
   $form = array(
     'test_email' => array(
       '#type' => 'textfield',
-      '#title' => t('Enter email address to test. No mail will actually be sent.'),
+      '#title' => t('Enter email address to test. No mail will actually be sent. You can also enter a like match e.g. %@foo.com if you want to just do an IP lookup'),
       '#default_value' => '',
     ),
     'cache' => array(
       '#type' => 'checkbox',
       '#title' => 'Do not use cache',
-      '#default_value' => 1,
-    ),
-    'summary' => array(
-      '#type' => 'checkbox',
-      '#title' => 'Show summary for matching emails',
       '#default_value' => 1,
     ),
     'cache_clear' => array(
@@ -359,29 +354,30 @@ function email_validator_debug_form_submit($form, &$form_state) {
     $host = drupal_substr(strchr($mail, '@'), 1);
 
     // First, run the tests.
-    $result = email_validator_check($form_state['values']['test_email'], $log, ! (bool) $form_state['values']['cache']);
-    $log = "<pre>" . htmlspecialchars(implode("\n", $log)) . "</pre>";
-
-    if ($result) {
-      form_set_error("test_email", $log);
-    }
-    else {
-      drupal_set_message("Accepted.<br />$log");
+    if (strpos($form_state['values']['test_email'], '%')===FALSE) {
+      $result = email_validator_check($form_state['values']['test_email'], $log, ! (bool) $form_state['values']['cache']);
+      $log = "<pre>" . htmlspecialchars(implode("\n", $log)) . "</pre>";
+      if ($result) {
+        form_set_error("test_email", $log);
+      }
+      else {
+        drupal_set_message("Accepted.<br />$log");
+      }
     }
 
     // perform ip analysis.
     // Look up ip(s) matching the given address, then add a report for each IP.
-    $result = db_query('SELECT * FROM {email_validator_cache} e WHERE e.email = :email',
+    $result = db_query('SELECT * FROM {email_validator_cache} e WHERE e.email LIKE(:email)',
       [ ':email' => $form_state['values']['test_email'] ]);
 
-    $table = ['header' => ['Date', 'IP', 'Result'], 'rows' => []];
+    $table = ['header' => ['Date', 'IP', 'Email', 'Result'], 'rows' => []];
     while ($row = $result->fetchAssoc()) {
       $ips[$row['ip']] = 1;
       $line = email_validator_code_translate($row['result'], $mail, $host);
       if ($line === null) {
         $line = "OK (code $row[result])";
       }
-      $table['rows'][] = [ date('j M Y H:i:s', $row['when']), $row['ip'], $line ];
+      $table['rows'][] = [ date('j M Y H:i:s', $row['when']), $row['ip'], $row['email'], $line ];
     }
     $ips = array_keys($ips);
     $table=theme('table', $table);
