@@ -261,18 +261,25 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
     return $msg;
   }
 
-  if (
+  if (preg_match("/^4/", $to)
+      || preg_match("/(Client host|Helo command) rejected/", $to)) {
+      // Any 4xx error also means we couldn't really check, a mail *might* get through
+      // (e.g. greylist, or mailbox full at mo).
       // This server does not like us (noos.fr behaves like this for instance).
-      preg_match("/(Client host|Helo command) rejected/", $to) ||
-      // Any 4xx error also means we couldn't really check except 450, which is
-      // explcitely a non-existing mailbox: 450 = "Requested mail action not
-      // taken: mailbox unavailable".
-      preg_match("/^4/", $to) && !preg_match("/^450/", $to)) {
-      // In those cases, accept the email, but log a warning.
-      $debug_log[] = "MAIL TO failed. (still accept). Got: $to";
-      watchdog('email_validator', "Could not verify email address at host $host: $to (but accepted from user's POV)");
+
+    // look out for greylisting
+    if (preg_match('/gr[ea]y ?list/i', $to)) {
+      $debug_log[] = "Greylisted, should be fine. Got: $to";
+      watchdog('email_validator', "Greylisting in operation at $host: $to accepted by validator.");
       $debug_log[] = $msg = email_validator_result($mail,$host, 6);
       return $msg;
+    }
+
+    // In those cases, accept the email, but log a warning.
+    $debug_log[] = "MAIL TO failed. (still accept). Got: $to";
+    watchdog('email_validator', "Could not verify email address at host $host: $to (but accepted from user's POV)");
+    $debug_log[] = $msg = email_validator_result($mail,$host, 6);
+    return $msg;
   }
 
   if (!preg_match("/^250/", $to)) {
