@@ -205,13 +205,21 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
       continue;
     }
 
-    if (preg_match("/^220/", $out = fgets($connect, 1024))) {
+    // Connected, read all the info the servers sends.
+    // The end to this happens when a space is on the 4th character!
+    $rcv ='';
+    do {
+      $_ = fgets($connect, 1024);
+      $rcv .= trim($_) . "\n"; // normalise line endings.
+    } while (isset($_[3]) && $_[3] != ' ');
+
+    if (preg_match("/^220 /m", $rcv)) {
       $debug_log[] = "...successful connection, will continue with this MX";
       // OK, we have a SMTP connection.
       break;
     }
     else {
-      $debug_log[] = "...connection was not allowed: $out";
+      $debug_log[] = "...connection was not allowed: $rcv";
       // The SMTP server probably does not like us
       // (dynamic/residential IP for aol.com for instance)
       // Be on the safe side and accept the address, at least it has a valid
@@ -243,20 +251,33 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
   }
   $debug_log[] = "Using $localhost for HELO";
 
+  $debug_log[] = "»HELO $localhost";
   fputs($connect, "HELO $localhost\r\n");
   $out = fgets($connect, 1024);
+  $debug_log[] = "«" . htmlspecialchars(trim($out));
+  $debug_log[] = "»MAIL FROM: <$from>";
   fputs($connect, "MAIL FROM: <$from>\r\n");
+
+  // We look out for any 250 response and consider that OK.
   $from = fgets($connect, 1024);
+  $debug_log[] = "«" . htmlspecialchars(trim($from));
+  $from_response_had_250_success = preg_match('/^250/', $from);
+
+  $debug_log[] = "»RCPT TO: <{$mail}>";
   fputs($connect, "RCPT TO: <{$mail}>\r\n");
   $to = fgets($connect, 1024);
+  $debug_log[] = "«" . htmlspecialchars(trim($to));
+  $debug_log[] = "»QUIT";
   fputs($connect, "QUIT\r\n");
   fclose($connect);
 
-  if (!preg_match("/^250/", $from)) {
+  if (!$from_response_had_250_success)  {
     // Again, something went wrong before we could really test the address.
     // Be on the safe side and accept it.
+    $from = implode("<br />",$from);
     watchdog('email_validator', "Could not verify email address at host $host: $from (but accepted from user's POV)");
-    $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got $from";
+    $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got<pre>$from</pre>";
+    $from = htmlspecialchars($from);
     $debug_log[] = $msg = email_validator_result($mail,$host, 5);
     return $msg;
   }
