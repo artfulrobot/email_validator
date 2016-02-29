@@ -148,8 +148,8 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
 
   if (!valid_email_address($mail)) {
     // The address is syntactically incorrect.
-    $debug_log[] = "$mail failed valid_email_address test";
-    $debug_log[] = $msg = t('Email address %mail is invalid', array('%mail'=>$mail));
+    $debug_log[] = check_plain("$mail failed valid_email_address test");
+    $debug_log[] = $msg = t('Email address %mail is invalid', array('%mail'=>check_plain($mail)));
     return $msg;
   }
 
@@ -181,7 +181,7 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
 
   // Let's see if we can find anything about this host in the DNS.
   if (!checkdnsrr($host, 'ANY')) {
-    $debug_log[] = "checkdnsrr ANY failed for host '$host'";
+    $debug_log[] = check_plain("checkdnsrr ANY failed for host '$host'");
     $debug_log[] = $msg = email_validator_result($mail,$host, 2);
     return $msg;
   }
@@ -196,11 +196,11 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
   // What SMTP servers should we contact?
   $mx_hosts = array();
   if (!getmxrr($host, $mx_hosts)) {
-    $debug_log[] = "getmxrr failed for '$host' - will use '$host'";
+    $debug_log[] = check_plain("getmxrr failed for '$host' - will use '$host'");
     // When there is no MX record, the host itself should be used.
     $mx_hosts[] = $host;
   }
-  $debug_log[] = "MX hosts found: " . implode(", ", $mx_hosts);
+  $debug_log[] = check_plain("MX hosts found: " . implode(", ", $mx_hosts));
 
   // Some of these may be multiple IPs - we'd need to test them all. Make a unique list.
   $mx_ips = array();
@@ -209,25 +209,40 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
       $mx_ips[$ip] = $hostname;
   } }
 
+
+  // SMTP responses may be multiple lines.
+  // We have to read until we get a line like
+  // "NNN ", ie. a response code followed by a space.
+  $get_smtp_response = function($connect) use (&$debug_log) {
+    $rcv ='';
+    do {
+      $_ = trim(fgets($connect, 1024));
+      $rcv .= "$_\n"; // normalise line endings.
+      $debug_log[] = "«" . check_plain($_);
+    } while (isset($_[3]) && $_[3] != ' ');
+    return $rcv;
+  };
+
+  // Just a wrapper to also write to the debug log.
+  $send_smtp = function($connect, $_) use (&$debug_log) {
+    $debug_log[] = check_plain("»$_");
+    fputs($connect, "$_\r\n");
+  };
+
   // Try to connect to one SMTP server.
   foreach ($mx_ips as $smtp=>$hostname) {
-    $debug_log[] = "Trying MX $smtp for $hostname";
+    $debug_log[] = check_plain("Trying MX $smtp for $hostname");
 
     $connect = @fsockopen($smtp, 25, $errno, $errstr, 15);
 
     if (!$connect) {
-      $debug_log[] = "...failed to connect to $smtp<-$hostname<-$host  (error: $errno: $errstr)";
+      $debug_log[] = check_plain("...failed to connect to $smtp<-$hostname<-$host  (error: $errno: $errstr)");
       continue;
     }
 
     // Connected, read all the info the servers sends.
     // The end to this happens when a space is on the 4th character!
-    $rcv ='';
-    do {
-      $_ = fgets($connect, 1024);
-      $rcv .= trim($_) . "\n"; // normalise line endings.
-    } while (isset($_[3]) && $_[3] != ' ');
-
+    $rcv = $get_smtp_response($connect);
     if (preg_match("/^220 /m", $rcv)) {
       $debug_log[] = "...successful connection, will continue with this MX";
       // OK, we have a SMTP connection.
@@ -246,7 +261,7 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
   }
 
   if (!$connect) {
-    $debug_log[] = "Failed to connect to any MX for $mail";
+    $debug_log[] = check_plain("Failed to connect to any MX for $mail");
     $debug_log[] = $msg = email_validator_result($mail,$host, 3);
     return $msg;
   }
@@ -257,47 +272,37 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
   if (preg_match('/\<(.*)\>/', $from, $match) > 0) {
     $from = $match[1];
   }
-  $debug_log[] = "Using <$from> for returnpath";
 
   // Should be good enough for RFC compliant SMTP servers.
   $localhost = $_SERVER["HTTP_HOST"];
   if (!$localhost) {
     $localhost = 'localhost';
   }
-  $debug_log[] = "Using $localhost for HELO";
 
-  $debug_log[] = "»HELO $localhost";
-  fputs($connect, "HELO $localhost\r\n");
-  $out = fgets($connect, 1024);
-  $debug_log[] = "«" . htmlspecialchars(trim($out));
-  $debug_log[] = "»MAIL FROM: <$from>";
-  fputs($connect, "MAIL FROM: <$from>\r\n");
+  // Have the chat...
+  $send_smtp($connect,"EHLO $localhost");
+  $out = $get_smtp_response($connect);
 
-  // We look out for any 250 response and consider that OK.
-  $from = fgets($connect, 1024);
-  $debug_log[] = "«" . htmlspecialchars(trim($from));
-  $from_response_had_250_success = preg_match('/^250/', $from);
+  $send_smtp($connect, "MAIL FROM: <$from>");
+  $from = $get_smtp_response($connect);
 
-  $debug_log[] = "»RCPT TO: <{$mail}>";
-  fputs($connect, "RCPT TO: <{$mail}>\r\n");
-  $to = fgets($connect, 1024);
-  $debug_log[] = "«" . htmlspecialchars(trim($to));
-  $debug_log[] = "»QUIT";
-  fputs($connect, "QUIT\r\n");
+  $send_smtp($connect, "RCPT TO: <{$mail}>");
+  $to = $get_smtp_response($connect);
+
+  $send_smtp($connect, "QUIT");
   fclose($connect);
 
-  if (!$from_response_had_250_success)  {
+  if (!preg_match('/^250 /m', $from))  {
     // Again, something went wrong before we could really test the address.
     // Be on the safe side and accept it.
-    $from = implode("<br />",$from);
+    $from = str_replace("\n", "<br/>\n", check_plain(implode("\n",$from)));
     watchdog('email_validator', "Could not verify email address at host $host: $from (but accepted from user's POV)");
     $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got<pre>$from</pre>";
-    $from = htmlspecialchars($from);
     $debug_log[] = $msg = email_validator_result($mail,$host, 5);
     return $msg;
   }
 
-  if (preg_match("/^4/", $to)
+  if (preg_match("/^4[\d][\d] /m", $to)
       || preg_match("/(Client host|Helo command) rejected/", $to)) {
       // Any 4xx error also means we couldn't really check, a mail *might* get through
       // (e.g. greylist, or mailbox full at mo).
@@ -305,6 +310,7 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
 
     // look out for greylisting
     if (preg_match('/gr[ea]y ?list/i', $to)) {
+      $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
       $debug_log[] = "Greylisted, should be fine. Got: $to";
       watchdog('email_validator', "Greylisting in operation at $host: $to accepted by validator.");
       $debug_log[] = $msg = email_validator_result($mail,$host, 6);
@@ -312,13 +318,14 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
     }
 
     // In those cases, accept the email, but log a warning.
-    $debug_log[] = "MAIL TO failed. (still accept). Got: $to";
+    $debug_log[] = "&#x2714; MAIL TO failed. (still accept).";
     watchdog('email_validator', "Could not verify email address at host $host: $to (but accepted from user's POV)");
     $debug_log[] = $msg = email_validator_result($mail,$host, 6);
     return $msg;
   }
 
-  if (!preg_match("/^250/", $to)) {
+  if (!preg_match("/^250 /m", $to)) {
+    $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
     watchdog('email_validator', "Rejected email address: $mail. Reason: $to");
     $debug_log[] = "MAIL TO did not give success (250) code. Instead got $to";
     $debug_log[] = $msg = email_validator_result($mail,$host, 4);
@@ -326,8 +333,8 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
   }
 
   // Everything is OK, so record success.
-  $debug_log[] = "SUCCESS.";
-  $debug_log[] = $msg = email_validator_result($mail,$host, 0);
+  $debug_log[] = "&#x2714; SUCCESS.";
+  $msg = email_validator_result($mail,$host, 0);
   return $msg;
 }
 
@@ -399,7 +406,7 @@ function email_validator_debug_form_submit($form, &$form_state) {
     // First, run the tests.
     if (strpos($form_state['values']['test_email'], '%')===FALSE) {
       $result = email_validator_check($form_state['values']['test_email'], $log, ! (bool) $form_state['values']['cache']);
-      $log = "<pre>" . htmlspecialchars(implode("\n", $log)) . "</pre>";
+      $log = implode("<br/>", $log);
       if ($result) {
         form_set_error("test_email", $log);
       }
