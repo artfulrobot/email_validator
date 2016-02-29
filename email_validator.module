@@ -120,6 +120,12 @@ function email_validator_admin_form()
           '#title' => t('How many failed attempts in one month before we ban the IP address? Suggestion: 10'),
           '#default_value' => variable_get('email_validator_flood_month',10),
         ],
+        'email_validator_enable' => [
+          '#type' => 'checkbox',
+          '#title' => t('SMTP Enabled'),
+          '#description' => t('Without this enabled email_validator_check() is the same as Drupal\'s  valid_email_address()'),
+          '#default_value' => variable_get('email_validator_enable',0),
+        ],
     );
     return system_settings_form($form);
 }
@@ -128,7 +134,11 @@ function email_validator_admin_form()
 /**
  * This function a modified version of the email_validator module's:
  * 	Verifies thoroughly that email addresses are correctly entered
- * 	Copyright: Daniel Bonniot <bonniot@users.sourceforge.net>
+ *
+ * 	Copyright:
+ * 	- Rich Lott <forums@artfulrobot.uk>
+ * 	- Daniel Bonniot <bonniot@users.sourceforge.net>,
+ * 	           
  * 	License:   GNU GPL v2 or later
  *
  * @return error string, or null (no error)
@@ -141,6 +151,11 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
     $debug_log[] = "$mail failed valid_email_address test";
     $debug_log[] = $msg = t('Email address %mail is invalid', array('%mail'=>$mail));
     return $msg;
+  }
+
+  if (!variable_get('email_validator_enable',0)) {
+    // Functionality disabled.
+    return null;
   }
 
   $host = drupal_substr(strchr($mail, '@'), 1);
