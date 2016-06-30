@@ -1,11 +1,40 @@
 <?php
 /**
- * Provides email_validator_check($mail)
+ * Provides email_validator_check($mail).
  *
  * Authors: Artful Robot <forums@artfulrobot.com>,
  * 	        Daniel Bonniot <bonniot@users.sourceforge.net>
  * License:   GNU GPL v2 or later
+ *
+ * We should return:
+ * - OK.
+ * - Message + confidence
+ *
+ * Confidence is a scale:
+ * - Good: configured checks were OK.
+ * - Medium: unsure, probably best to check.
+ * - Low: some error.
+ *
+ * Confidence EMAIL_VALIDATOR_UNDELIVERABLE
+ * - 2: No DNS. Email will definitely be undeliverable.
+ * - 4: SMTP. rejected. Likely undeliverable.
+ *
+ * Confidence EMAIL_VALIDATOR_UNSURE
+ * - 3: SMTP failed to connect to any MX. Unlikely we can send email, possibly
+ *   could work later.
+ * - 5: SMTP We could not definitely say it would work because we did not
+ *   receive 250 code from SMTP chat. However a persistent MTA might succeed.
+ * - 6: SMTP. 4xx errors mean we can't fully check, inc. geylisting.
+ *
+ * Confidence EMAIL_VALIDATOR_OK
  */
+
+define('EMAIL_VALIDATOR_MINIMAL', 0);
+define('EMAIL_VALIDATOR_DNS', 1);
+define('EMAIL_VALIDATOR_FULL', 2);
+define('EMAIL_VALIDATOR_UNDELIVERABLE', 0);
+define('EMAIL_VALIDATOR_UNSURE', 1);
+define('EMAIL_VALIDATOR_OK', 2);
 
 // Drupal hooks
 
@@ -121,10 +150,22 @@ function email_validator_admin_form()
           '#default_value' => variable_get('email_validator_flood_month',10),
         ],
         'email_validator_enable' => [
-          '#type' => 'checkbox',
-          '#title' => t('SMTP Enabled'),
-          '#description' => t('Without this enabled email_validator_check() is the same as Drupal\'s  valid_email_address()'),
-          '#default_value' => variable_get('email_validator_enable',0),
+          '#type' => 'select',
+          '#title' => t('Validation level'),
+          '#description' => t('Choose the level of validation'),
+          '#options' => [
+            EMAIL_VALIDATOR_MINIMAL => 'Minimal: just check syntax',
+            EMAIL_VALIDATOR_DNS => 'Check DNS has MX record',
+            EMAIL_VALIDATOR_FULL => 'Check SMTP will accept mail',
+            ],
+          '#default_value' => variable_get('email_validator_enable', EMAIL_VALIDATOR_MINIMAL),
+        ],
+        'email_validator_smtp_skip' => [
+          '#type' => 'textarea',
+          '#title' => t('Skip SMTP for these domains'),
+          '#description' => t('Never do SMTP checks for these domains. This can be useful for domains that consider SMTP checks suspicious.'),
+          '#default_value' => variable_get('email_validator_smtp_skip',
+            "hotmail.*\noutlook.com\nlive.com\n"),
         ],
     );
     return system_settings_form($form);
@@ -133,7 +174,13 @@ function email_validator_admin_form()
 
 /**
  * This function a modified version of the email_validator module's:
- * 	Verifies thoroughly that email addresses are correctly entered
+ * 	Verifies thoroughly that email addresses are correctly entered.
+ *
+ * There are these levels of check:
+ *
+ * 1. Drupal's valid_email_address()
+ * 2. Check for domain and MX record.
+ * 3. Try SMTP.
  *
  * 	Copyright:
  * 	- Rich Lott <forums@artfulrobot.uk>
@@ -144,20 +191,68 @@ function email_validator_admin_form()
  * @return error string, or null (no error)
  */
 function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
-  $debug_log = array();
+  $result = email_validator_run_check($mail, $use_cache);
+  $debug_log = $result['log'];
+  return $result['message'];
+}
+
+/**
+ * This function a modified version of the email_validator module's:
+ * 	Verifies thoroughly that email addresses are correctly entered.
+ *
+ * There are these levels of check:
+ *
+ * 1. Drupal's valid_email_address()
+ * 2. Check for domain and MX record.
+ * 3. Try SMTP.
+ *
+ * 	Copyright:
+ * 	- Rich Lott <forums@artfulrobot.uk>
+ * 	- Daniel Bonniot <bonniot@users.sourceforge.net>,
+ * 	           
+ * 	License:   GNU GPL v2 or later
+ *
+ * @return array:
+ * - confidence: one of:
+ *   - EMAIL_VALIDATOR_UNDELIVERABLE
+ *   - EMAIL_VALIDATOR_UNSURE
+ *   - EMAIL_VALIDATOR_OK
+ * - message: string
+ * - log: array of messages.
+ */
+function email_validator_run_check($mail, $use_cache=TRUE) {
+  $return = [
+    'confidence' => EMAIL_VALIDATOR_OK,
+    'message' => '',
+    'log' => [],
+    ];
+  $confidence_map = [
+    0 => EMAIL_VALIDATOR_OK,
+    1 => EMAIL_VALIDATOR_OK,
+    2 => EMAIL_VALIDATOR_UNDELIVERABLE,
+    3 => EMAIL_VALIDATOR_UNSURE,
+    4 => EMAIL_VALIDATOR_UNDELIVERABLE,
+    5 => EMAIL_VALIDATOR_UNSURE,
+    6 => EMAIL_VALIDATOR_UNSURE,
+    ];
+  $debug_log = &$return['log'];
+  $level = variable_get('email_validator_enable', EMAIL_VALIDATOR_MINIMAL);
 
   if (!valid_email_address($mail)) {
     // The address is syntactically incorrect.
     $debug_log[] = check_plain("$mail failed valid_email_address test");
-    $debug_log[] = $msg = t('Email address %mail is invalid', array('%mail'=>check_plain($mail)));
-    return $msg;
+    $debug_log[] = $return['message'] = t('Email address %mail is invalid', array('%mail'=>check_plain($mail)));
+    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    return $return;
   }
 
-  if (!variable_get('email_validator_enable',0)) {
-    // Functionality disabled.
-    return null;
+  if ($level == EMAIL_VALIDATOR_MINIMAL) {
+    // Further functionality disabled.
+    $return['confidence'] = EMAIL_VALIDATOR_OK;
+    return $return;
   }
 
+  // Check MX records.
   $host = drupal_substr(strchr($mail, '@'), 1);
 
   if ($use_cache) {
@@ -170,8 +265,9 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
            ))->fetchField();
     if ($result !== false) {
       $debug_log[] = "Returning from cache: result $result";
-      $debug_log[] = $msg = email_validator_code_translate($result, $mail, $host);
-      return $msg;
+      $debug_log[] = $return['message'] = email_validator_code_translate($result, $mail, $host);
+      $return['confidence'] = $confidence_map[$result];
+      return $return;
     }
     $debug_log[] = "Not in cache";
   }
@@ -179,18 +275,41 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
     $debug_log[] = "Cache not consulted";
   }
 
+  // Flood check.
+  if (email_validator_flood($mail)) {
+    $debug_log[] = $return['message'] = t('Sorry, there have been too many invalid email addresses tried from your IP address.');
+    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    return $return;
+  }
+
   // Let's see if we can find anything about this host in the DNS.
   if (!checkdnsrr($host, 'ANY')) {
     $debug_log[] = check_plain("checkdnsrr ANY failed for host '$host'");
-    $debug_log[] = $msg = email_validator_result($mail,$host, 2);
-    return $msg;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 2);
+    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    return $return;
   }
   $debug_log[] = "checkdnsrr ANY success";
 
-  // are we banned?
-  if (email_validator_flood($mail)) {
-    $debug_log[] = $msg = t('Sorry, there have been too many invalid email addresses tried from your IP address.');
-    return $msg;
+  if ($level == EMAIL_VALIDATOR_DNS) {
+    // Reached configured level.
+    $debug_log[] = "&#x2714; SUCCESS (syntax, DNS).";
+    $return['message'] = email_validator_result($mail, $host, 0);
+    return $return;
+  }
+  foreach (explode("\n", variable_get('email_validator_smtp_skip', '')) as $pattern) {
+    $pattern = trim($pattern); 
+    if (!$pattern) {
+      continue;
+    }
+    if (fnmatch($pattern, $host)) {
+      $debug_log[] = "Skipping SMTP checks because domain matched '$pattern'";
+
+      // Everything is OK, so record success.
+      $debug_log[] = "&#x2714; SUCCESS (syntax, DNS, skipped SMTP check).";
+      $return['message'] = email_validator_result($mail, $host, 0);
+      return $return;
+    }
   }
 
   // What SMTP servers should we contact?
@@ -252,18 +371,15 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
       $debug_log[] = "...connection was not allowed: $rcv";
       // The SMTP server probably does not like us
       // (dynamic/residential IP for aol.com for instance)
-      // Be on the safe side and accept the address, at least it has a valid
-      // domain part...
-      // $debug_log[] = $msg = email_validator_result($mail,$host, 1);
-      // return $msg;
       $connect = FALSE;
     }
   }
 
   if (!$connect) {
     $debug_log[] = check_plain("Failed to connect to any MX for $mail");
-    $debug_log[] = $msg = email_validator_result($mail,$host, 3);
-    return $msg;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 3);
+    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    return $return;
   }
 
   $from = variable_get('email_validator_returnpath',
@@ -298,8 +414,9 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
     $from = str_replace("\n", "<br/>\n", check_plain(implode("\n",$from)));
     watchdog('email_validator', "Could not verify email address at host $host: $from (but accepted from user's POV)");
     $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got<pre>$from</pre>";
-    $debug_log[] = $msg = email_validator_result($mail,$host, 5);
-    return $msg;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 5);
+    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    return $return;
   }
 
   if (preg_match("/^4[\d][\d] /m", $to)
@@ -313,29 +430,32 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
       $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
       $debug_log[] = "Greylisted, should be fine. Got: $to";
       watchdog('email_validator', "Greylisting in operation at $host: $to accepted by validator.");
-      $debug_log[] = $msg = email_validator_result($mail,$host, 6);
-      return $msg;
+      $debug_log[] = $return['message'] = email_validator_result($mail,$host, 6);
+      $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+      return $return;
     }
 
     // In those cases, accept the email, but log a warning.
     $debug_log[] = "&#x2714; MAIL TO failed. (still accept).";
     watchdog('email_validator', "Could not verify email address at host $host: $to (but accepted from user's POV)");
-    $debug_log[] = $msg = email_validator_result($mail,$host, 6);
-    return $msg;
+    $debug_log[] = $msg = $return['message']($mail,$host, 6);
+    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    return $return;
   }
 
   if (!preg_match("/^250 /m", $to)) {
     $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
     watchdog('email_validator', "Rejected email address: $mail. Reason: $to");
     $debug_log[] = "MAIL TO did not give success (250) code. Instead got $to";
-    $debug_log[] = $msg = email_validator_result($mail,$host, 4);
-    return $msg;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 4);
+    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    return $return;
   }
 
   // Everything is OK, so record success.
   $debug_log[] = "&#x2714; SUCCESS.";
-  $msg = email_validator_result($mail,$host, 0);
-  return $msg;
+  $return['message'] = email_validator_result($mail,$host, 0);
+  return $return;
 }
 
 
