@@ -50,6 +50,12 @@ function email_validator_menu()
     'page arguments'  => array('email_validator_admin_form'),
     'access arguments'  => array('administer email_validator'),
   );
+  $items['admin/reports/email-validator/demo'] = array(
+    'title' => 'Email Validator Demo',
+    'page callback' => 'drupal_get_form',
+    'page arguments'  => array('email_validator_demo_form'),
+    'access arguments'  => array('administer email_validator'),
+  );
   $items['admin/reports/email-validator'] = array(
     'title' => 'Email Validator',
     'page callback' => 'drupal_get_form',
@@ -124,6 +130,27 @@ function email_validator_schema()
     return $schema;
 }
 
+/**
+ * Implements hook_form_alter().
+ */
+function email_validator_form_alter(&$form, &$form_state, $form_id) {
+  if (!empty($form_state['email_validator_needs_confirm'])) {
+    // Create a 2nd email field right after the 1st.
+    $parents = $form_state['email_validator_needs_confirm'];
+    $original_email_element = array_pop($parents);
+    $ref = &$form;
+    while ($parents) {
+      $ref = &$ref[array_shift($parents)];
+    }
+
+    $ref['email_validator_confirm'] = [
+      '#type' => 'textfield',
+      '#title' => 'Please re-enter your email',
+      '#required' => TRUE,
+      '#weight' => $ref[$original_email_element]['#weight'] + 0.0001,
+      ];
+  }
+}
 // Forms
 
 /**
@@ -249,6 +276,26 @@ function email_validator_run_check($mail, $use_cache=TRUE) {
   if ($level == EMAIL_VALIDATOR_MINIMAL) {
     // Further functionality disabled.
     $return['confidence'] = EMAIL_VALIDATOR_OK;
+    return $return;
+  }
+
+  // For testing purposes we use three example.com emails.
+  if ($mail == 'ok@example.com') {
+    $debug_log[] = "Allowing test address $mail";
+    return $return;
+  }
+  elseif ($mail == 'unsure@example.com') {
+    $debug_log[] = "Warning test address $mail";
+    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    $debug_log[] = "Warning about test address $mail";
+    $return['message'] = t('There is a problem but it might be temporary.');
+    return $return;
+  }
+  elseif ($mail == 'fail@example.com') {
+    $debug_log[] = "Fail test address $mail";
+    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    $debug_log[] = "Undeliverable test address $mail";
+    $return['message'] = t('Undeliverable');
     return $return;
   }
 
@@ -448,7 +495,7 @@ function email_validator_run_check($mail, $use_cache=TRUE) {
     watchdog('email_validator', "Rejected email address: $mail. Reason: $to");
     $debug_log[] = "MAIL TO did not give success (250) code. Instead got $to";
     $debug_log[] = $return['message'] = email_validator_result($mail,$host, 4);
-    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
     return $return;
   }
 
@@ -586,8 +633,112 @@ function email_validator_debug_form_submit($form, &$form_state) {
 }
 
 
+/**
+ * Demo form
+ */
+function email_validator_demo_form() {
+  $form = array(
+    'fs' => [
+      //'#tree' => TRUE, // for testing.
+      '#type' => 'fieldset',
+      '#title' => 'Demo fieldset',
+      'test_email' => array(
+        '#type' => 'textfield',
+        '#title' => t('Email'),
+        '#default_value' => '',
+        '#element_validate' => ['email_validator_element_validate'],
+      ),
+    ],
+    'name' => [
+      '#type' => 'textfield',
+      '#title' => 'Some other field',
+      '#description' => t('You can ignore this.'),
+    ],
+    'submit' => array(
+      '#type' => 'submit',
+      '#value' => 'Submit',
+    ),
+  );
+  return $form;
+}
+/**
+ * Check the given email
+ */
+function email_validator_demo_form_validate($form, &$form_state) {
+
+}
+/**
+ * Check the given email
+ */
+function email_validator_demo_form_submit($form, &$form_state) {
+  drupal_set_message("Email accepted; form submitted.");
+}
+
+
 // Utility functions
 
+function email_validator_element_validate($element, &$form_state, $form) {
+  // I think I need to check for #required?
+  if (empty($element['#value'])) {
+    if (empty($element['#required'])) {
+      // Field is optional.
+      return;
+    }
+    // Required but not provided.
+    form_error($element, t('This field is required.'));
+    return;
+  }
+
+  // If we've insisted on a confirm field, check this matches first.
+  if (!empty($form_state['email_validator_needs_confirm'])) {
+    // User has provided a 2nd email.
+
+    // Find the value for the confirm.
+    $ref = $form_state['values'];
+    if ($element['#tree']) {
+      $parents = $element['#parents'];
+      array_pop($parents);
+      while ($parents) {
+        $ref = $ref[array_shift($parents)];
+      }
+    }
+    $confirm_value = $ref['email_validator_confirm'];
+    if ($confirm_value != $element['#value']) {
+      // The user-entered 2nd version didn't match.
+      // Don't do any further checking now.
+      form_error($element, t("Emails did not match"));
+      return;
+    }
+  }
+
+  $result = email_validator_run_check($element['#value'], FALSE);
+
+  if ($result['confidence'] == EMAIL_VALIDATOR_OK) {
+    // All fine.
+    return;
+  }
+  if ($result['confidence'] == EMAIL_VALIDATOR_UNDELIVERABLE) {
+    // Cannot proceed.
+    form_error($element, $result['message']);
+    return;
+  }
+  // Left with the unsure case.
+
+  // @todo config changes this. Q. can I intercept form (re)build? form alter +
+  // formstate hook?
+
+  if (!empty($form_state['email_validator_needs_confirm'])) {
+    // User has provided a 2nd email and we know it matches (test above).
+    // Let's accept it, user has confirmed it manually.
+      return;
+  }
+
+  // Provided email has not yet been confirmed by user, issue warning.
+  $form_state['email_validator_needs_confirm'] = $element['#array_parents'];
+  $form_state['rebuild'] = TRUE;
+  drupal_set_message(t("Please double-check and re-enter your email address as we may have detected a problem.")
+    .  $result['message'], 'warning');
+}
 /**
  * @return error string, or null (no error)
  */
@@ -605,7 +756,7 @@ function email_validator_code_translate($code, $mail, $host) {
     case 3:
         return t('Email host %host is not accepting email.', array('%host' => "$host"));
     case 4:
-        return t('The email server for %mail is not accepting our email. Could be wrong email, full inbox, or a blocking policy.', array('%mail' => "$mail"));
+        return t('The email server for %mail is not accepting our email. Could be wrong email, full inbox, or a blocking policy - could be a temporary problem.', array('%mail' => "$mail"));
     default:
         return;
   }
