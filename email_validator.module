@@ -273,6 +273,11 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
  * 	           
  * 	License:   GNU GPL v2 or later
  *
+ * @param string $mail the email to check.
+ * @param bool $use_cache
+ * @param mixed $level Supply if you don't want the globally configured value.
+ * @param mixed $skip_patterns Supply an array if you don't want config value.
+ *
  * @return array:
  * - confidence: one of:
  *   - EMAIL_VALIDATOR_UNDELIVERABLE
@@ -281,7 +286,21 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
  * - message: string
  * - log: array of messages.
  */
-function email_validator_run_check($mail, $use_cache=TRUE) {
+function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_patterns=NULL) {
+  if ($level === NULL) {
+    // Use configured enable level.
+    $level = variable_get('email_validator_enable', EMAIL_VALIDATOR_MINIMAL);
+  }
+  elseif (!is_int($level) || $level < EMAIL_VALIDATOR_MINIMAL || $level > EMAIL_VALIDATOR_FULL) {
+    throw new InvalidArgumentException('email_validator_run_check: Invalid $level parameter. Expected one of EMAIL_VALIDATOR_MINIMAL, EMAIL_VALIDATOR_DNS, EMAIL_VALIDATOR_FULL');
+  }
+  if ($skip_patterns === NULL) {
+    // Use configured skip patterns.
+    $skip_patterns = explode("\n", variable_get('email_validator_smtp_skip', ''));
+  }
+  elseif (!is_array($skip_patterns)) {
+    throw new InvalidArgumentException('email_validator_run_check: If provided, $skip_patterns must be an array.');
+  }
   $return = [
     'confidence' => EMAIL_VALIDATOR_OK,
     'message' => '',
@@ -297,7 +316,6 @@ function email_validator_run_check($mail, $use_cache=TRUE) {
     6 => EMAIL_VALIDATOR_UNSURE,
     ];
   $debug_log = &$return['log'];
-  $level = variable_get('email_validator_enable', EMAIL_VALIDATOR_MINIMAL);
 
   if (!valid_email_address($mail)) {
     // The address is syntactically incorrect.
@@ -378,7 +396,7 @@ function email_validator_run_check($mail, $use_cache=TRUE) {
     $return['message'] = email_validator_result($mail, $host, 0);
     return $return;
   }
-  foreach (explode("\n", variable_get('email_validator_smtp_skip', '')) as $pattern) {
+  foreach ($skip_patterns as $pattern) {
     $pattern = trim($pattern); 
     if (!$pattern) {
       continue;
@@ -749,7 +767,7 @@ function email_validator_element_validate($element, &$form_state, $form) {
   }
 
   // Run the actual check.
-  $result = email_validator_run_check($element['#value'], FALSE);
+  $result = email_validator_run_check($element['#value']);
 
   if ($result['confidence'] == EMAIL_VALIDATOR_OK) {
     // All fine.
