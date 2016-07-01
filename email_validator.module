@@ -36,6 +36,62 @@ define('EMAIL_VALIDATOR_UNDELIVERABLE', 0);
 define('EMAIL_VALIDATOR_UNSURE', 1);
 define('EMAIL_VALIDATOR_OK', 2);
 
+class EmailValidator {
+  public static $runtime_forms=[];
+
+  public static function setFormRequiresConfirm($form, $element, $message) {
+    // Store on runtime cache available to the #pre_render.
+    static::$runtime_forms[$form['#form_id']] = [
+      'element' => $element['#array_parents'],
+      'confirmed' => FALSE,
+      ];
+    form_error($element, t($message));
+  }
+  public static function previouslyConfirmed($form, $element) {
+    // Store on runtime cache available to the #pre_render.
+    static::$runtime_forms[$form['#form_id']] = [
+      'element' => $element['#array_parents'],
+      'confirmed' => $element['#value'],
+      ];
+  }
+  public static function preRender($element) {
+    if (empty($element['#form_id']) || empty(static::$runtime_forms[$element['#form_id']])) {
+      // Either something's not configured right (no form_id)
+      // or we don't need to act on this element.
+      return $element;
+    }
+
+    // Need to add elements to the form.
+    $conf = static::$runtime_forms[$element['#form_id']];
+
+    // Prevent infinite loop.
+    unset($element['#pre_render']);
+
+    if ($conf['confirmed']) {
+      // Create a hidden field with the confirmed email.
+      return [$element,
+        'email_validator_confirmed' => [
+          '#tree' => FALSE,
+          '#type' => 'hidden',
+          '#name' => 'email_validator_confirmed',
+          '#value' => $element['#value'],
+        ]];
+    }
+    else {
+      // Create a field for the user to provide a confirmation.
+      return [$element,
+        'email_validator_confirm' => [
+          '#tree' => FALSE,
+          '#type' => 'textfield',
+          '#title' => 'Please confirm',
+          '#id' => 'email-validator-confirm',
+          '#name' => 'email_validator_confirm',
+        ]];
+    }
+  }
+
+}
+
 // Drupal hooks
 
 /**
@@ -134,6 +190,7 @@ function email_validator_schema()
  * Implements hook_form_alter().
  */
 function email_validator_form_alter(&$form, &$form_state, $form_id) {
+  return;
   if (!empty($form_state['email_validator_needs_confirm'])) {
     // Create a 2nd email field right after the 1st.
     $parents = $form_state['email_validator_needs_confirm'];
@@ -646,12 +703,15 @@ function email_validator_demo_form() {
         '#type' => 'textfield',
         '#title' => t('Email'),
         '#default_value' => '',
+        '#pre_render' => ['element_validator_pre_render'],
+        '#form_id' => __FUNCTION__,
         '#element_validate' => ['email_validator_element_validate'],
       ),
     ],
     'name' => [
       '#type' => 'textfield',
-      '#title' => 'Some other field',
+      '#title' => 'Some other required field',
+      '#required' => TRUE,
       '#description' => t('You can ignore this.'),
     ],
     'submit' => array(
@@ -665,7 +725,7 @@ function email_validator_demo_form() {
  * Check the given email
  */
 function email_validator_demo_form_validate($form, &$form_state) {
-
+$x=1;
 }
 /**
  * Check the given email
@@ -677,6 +737,9 @@ function email_validator_demo_form_submit($form, &$form_state) {
 
 // Utility functions
 
+function element_validator_pre_render($element) {
+  return EmailValidator::preRender($element);
+}
 function email_validator_element_validate($element, &$form_state, $form) {
   // I think I need to check for #required?
   if (empty($element['#value'])) {
@@ -689,28 +752,26 @@ function email_validator_element_validate($element, &$form_state, $form) {
     return;
   }
 
-  // If we've insisted on a confirm field, check this matches first.
-  if (!empty($form_state['email_validator_needs_confirm'])) {
+  if (isset($form_state['input']['email_validator_confirm'])) {
+    // Confirm field is sent.
     // User has provided a 2nd email.
-
-    // Find the value for the confirm.
-    $ref = $form_state['values'];
-    if ($element['#tree']) {
-      $parents = $element['#parents'];
-      array_pop($parents);
-      while ($parents) {
-        $ref = $ref[array_shift($parents)];
-      }
-    }
-    $confirm_value = $ref['email_validator_confirm'];
-    if ($confirm_value != $element['#value']) {
+    if ($form_state['input']['email_validator_confirm'] != $element['#value']) {
       // The user-entered 2nd version didn't match.
       // Don't do any further checking now.
       form_error($element, t("Emails did not match"));
+      EmailValidator::setFormRequiresConfirm($form, $element,
+        "The emails did not match. Please re-check.");
       return;
     }
   }
+  if (isset($form_state['input']['email_validator_confirmed'])
+    && $form_state['input']['email_validator_confirmed'] == $element['#value']) {
+      // User has previously confirmed this value. All good.
+      EmailValidator::previouslyConfirmed($form, $element);
+      return;
+  }
 
+  // Run the actual check.
   $result = email_validator_run_check($element['#value'], FALSE);
 
   if ($result['confidence'] == EMAIL_VALIDATOR_OK) {
@@ -722,22 +783,20 @@ function email_validator_element_validate($element, &$form_state, $form) {
     form_error($element, $result['message']);
     return;
   }
+
   // Left with the unsure case.
-
-  // @todo config changes this. Q. can I intercept form (re)build? form alter +
-  // formstate hook?
-
-  if (!empty($form_state['email_validator_needs_confirm'])) {
-    // User has provided a 2nd email and we know it matches (test above).
-    // Let's accept it, user has confirmed it manually.
-      return;
+  if (isset($form_state['input']['email_validator_confirm'])) {
+    // Test was unsure but user has provided a 2nd email and we know it matches
+    // (tested above). Let's accept it.
+    EmailValidator::previouslyConfirmed($form, $element);
+    return;
   }
 
-  // Provided email has not yet been confirmed by user, issue warning.
-  $form_state['email_validator_needs_confirm'] = $element['#array_parents'];
-  $form_state['rebuild'] = TRUE;
-  drupal_set_message(t("Please double-check and re-enter your email address as we may have detected a problem.")
-    .  $result['message'], 'warning');
+  // Test was unsure and provided email has not yet been confirmed by user,
+  // mark it as invalid, requiring confirmation field.
+  EmailValidator::setFormRequiresConfirm($form, $element,
+    "Please double-check and re-enter your email address as we may have detected a problem.");
+
 }
 /**
  * @return error string, or null (no error)
