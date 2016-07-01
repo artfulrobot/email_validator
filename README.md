@@ -34,7 +34,7 @@ In your form's definition for the email field, add the following:
       // ...
       'some_email_field' => [
         // ... all your existing properties ...
-        '#form_id' => $form['#form_id'],
+        '#form_id' => __FUNCTION__, // usually, otherwise specify.
         '#pre_render' => ['email_validator_pre_render'],
         '#element_validate' => ['email_validator_element_validate'],
       ],

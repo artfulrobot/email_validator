@@ -81,7 +81,7 @@ class EmailValidator {
         'email_validator_confirm' => [
           '#tree' => FALSE,
           '#type' => 'textfield',
-          '#title' => 'Please confirm',
+          '#title' => t('Please re-enter email to confirm'),
           '#id' => 'email-validator-confirm',
           '#name' => 'email_validator_confirm',
           '#weight' => isset($element['#weight']) ? $element['#weight'] + 0.0001 : 0,
@@ -698,7 +698,7 @@ function email_validator_demo_form() {
         '#type' => 'textfield',
         '#title' => t('Email'),
         '#default_value' => '',
-        '#pre_render' => ['element_validator_pre_render'],
+        '#pre_render' => ['email_validator_pre_render'],
         '#form_id' => __FUNCTION__,
         '#element_validate' => ['email_validator_element_validate'],
       ),
@@ -732,7 +732,7 @@ function email_validator_demo_form_submit($form, &$form_state) {
 
 // Utility functions
 
-function element_validator_pre_render($element) {
+function email_validator_pre_render($element) {
   return EmailValidator::preRender($element);
 }
 function email_validator_element_validate($element, &$form_state, $form) {
