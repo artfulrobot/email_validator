@@ -42,7 +42,6 @@ class EmailValidator {
   public static function setFormRequiresConfirm($form, $element, $message) {
     // Store on runtime cache available to the #pre_render.
     static::$runtime_forms[$form['#form_id']] = [
-      'element' => $element['#array_parents'],
       'confirmed' => FALSE,
       ];
     form_error($element, t($message));
@@ -50,7 +49,6 @@ class EmailValidator {
   public static function previouslyConfirmed($form, $element) {
     // Store on runtime cache available to the #pre_render.
     static::$runtime_forms[$form['#form_id']] = [
-      'element' => $element['#array_parents'],
       'confirmed' => $element['#value'],
       ];
   }
@@ -86,6 +84,7 @@ class EmailValidator {
           '#title' => 'Please confirm',
           '#id' => 'email-validator-confirm',
           '#name' => 'email_validator_confirm',
+          '#weight' => isset($element['#weight']) ? $element['#weight'] + 0.0001 : 0,
         ]];
     }
   }
@@ -186,28 +185,6 @@ function email_validator_schema()
     return $schema;
 }
 
-/**
- * Implements hook_form_alter().
- */
-function email_validator_form_alter(&$form, &$form_state, $form_id) {
-  return;
-  if (!empty($form_state['email_validator_needs_confirm'])) {
-    // Create a 2nd email field right after the 1st.
-    $parents = $form_state['email_validator_needs_confirm'];
-    $original_email_element = array_pop($parents);
-    $ref = &$form;
-    while ($parents) {
-      $ref = &$ref[array_shift($parents)];
-    }
-
-    $ref['email_validator_confirm'] = [
-      '#type' => 'textfield',
-      '#title' => 'Please re-enter your email',
-      '#required' => TRUE,
-      '#weight' => $ref[$original_email_element]['#weight'] + 0.0001,
-      ];
-  }
-}
 // Forms
 
 /**
@@ -696,7 +673,7 @@ function email_validator_debug_form_submit($form, &$form_state) {
 function email_validator_demo_form() {
   $form = array(
     'fs' => [
-      //'#tree' => TRUE, // for testing.
+      '#tree' => TRUE, // for testing.
       '#type' => 'fieldset',
       '#title' => 'Demo fieldset',
       'test_email' => array(
