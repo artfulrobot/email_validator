@@ -17,11 +17,11 @@
  *
  * Confidence EMAIL_VALIDATOR_UNDELIVERABLE
  * - 2: No DNS. Email will definitely be undeliverable.
- * - 4: SMTP. rejected. Likely undeliverable.
  *
  * Confidence EMAIL_VALIDATOR_UNSURE
  * - 3: SMTP failed to connect to any MX. Unlikely we can send email, possibly
  *   could work later.
+ * - 4: SMTP. rejected. Likely undeliverable by us, but perhaps we're blocked?
  * - 5: SMTP We could not definitely say it would work because we did not
  *   receive 250 code from SMTP chat. However a persistent MTA might succeed.
  * - 6: SMTP. 4xx errors mean we can't fully check, inc. geylisting.
@@ -246,7 +246,7 @@ function email_validator_admin_form()
  * 	Copyright:
  * 	- Rich Lott <forums@artfulrobot.uk>
  * 	- Daniel Bonniot <bonniot@users.sourceforge.net>,
- * 	           
+ *
  * 	License:   GNU GPL v2 or later
  *
  * @return error string, or null (no error)
@@ -304,14 +304,14 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   $return = [
     'confidence' => EMAIL_VALIDATOR_OK,
     'message' => '',
-    'log' => [],
+    'log' => [ "Checking: '$mail'" ],
     ];
   $confidence_map = [
     0 => EMAIL_VALIDATOR_OK,
     1 => EMAIL_VALIDATOR_OK,
     2 => EMAIL_VALIDATOR_UNDELIVERABLE,
     3 => EMAIL_VALIDATOR_UNSURE,
-    4 => EMAIL_VALIDATOR_UNDELIVERABLE,
+    4 => EMAIL_VALIDATOR_UNSURE,
     5 => EMAIL_VALIDATOR_UNSURE,
     6 => EMAIL_VALIDATOR_UNSURE,
     ];
@@ -377,6 +377,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   // Flood check.
   if (email_validator_flood($mail)) {
     $debug_log[] = $return['message'] = t('Sorry, there have been too many invalid email addresses tried from your IP address.');
+    watchdog('email_validator', "Flood: $mail: lookups denied", [], WATCHDOG_WARNING);
     $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
     return $return;
   }
@@ -385,6 +386,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   if (!checkdnsrr($host, 'ANY')) {
     $debug_log[] = check_plain("checkdnsrr ANY failed for host '$host'");
     $debug_log[] = $return['message'] = email_validator_result($mail,$host, 2);
+    watchdog('email_validator', "Undeliverable: $mail: No DNS", [], WATCHDOG_WARNING);
     $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
     return $return;
   }
@@ -511,7 +513,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     // Again, something went wrong before we could really test the address.
     // Be on the safe side and accept it.
     $from = str_replace("\n", "<br/>\n", check_plain(implode("\n",$from)));
-    watchdog('email_validator', "Could not verify email address at host $host: $from (but accepted from user's POV)");
+    watchdog('email_validator', "Unsure: $mail: Could not verify email address at host $host: $from");
     $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got<pre>$from</pre>";
     $debug_log[] = $return['message'] = email_validator_result($mail,$host, 5);
     $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
@@ -528,7 +530,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     if (preg_match('/gr[ea]y ?list/i', $to)) {
       $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
       $debug_log[] = "Greylisted, should be fine. Got: $to";
-      watchdog('email_validator', "Greylisting in operation at $host: $to accepted by validator.");
+      watchdog('email_validator', "Unsure: $mail: Greylisting in operation at $host: $to");
       $debug_log[] = $return['message'] = email_validator_result($mail,$host, 6);
       $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
       return $return;
@@ -536,15 +538,14 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
 
     // In those cases, accept the email, but log a warning.
     $debug_log[] = "&#x2714; MAIL TO failed. (still accept).";
-    watchdog('email_validator', "Could not verify email address at host $host: $to (but accepted from user's POV)");
+    watchdog('email_validator', "Unsure: $mail: Could not verify email address at host $host: $to (but accepted from user's POV)");
     $debug_log[] = $msg = $return['message']($mail,$host, 6);
     $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
     return $return;
   }
 
   if (!preg_match("/^250 /m", $to)) {
-    $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
-    watchdog('email_validator', "Rejected email address: $mail. Reason: $to");
+    watchdog('email_validator', "Unsure: $mail: Rejected email address. Reason: $to");
     $debug_log[] = "MAIL TO did not give success (250) code. Instead got $to";
     $debug_log[] = $return['message'] = email_validator_result($mail,$host, 4);
     $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
@@ -756,8 +757,10 @@ function email_validator_element_validate($element, &$form_state, $form) {
       form_error($element, t("Emails did not match"));
       EmailValidator::setFormRequiresConfirm($form, $element,
         "The emails did not match. Please re-check.");
+      watchdog('email_validator', "Failed Double Entry: {$element['#value']}, {$form_State['input']['email_validator_confirm']}", [], WATCHDOG_WARNING);
       return;
     }
+    watchdog('email_validator', "Confirmed by double entry: {$element['#value']}");
   }
   if (isset($form_state['input']['email_validator_confirmed'])
     && $form_state['input']['email_validator_confirmed'] == $element['#value']) {
@@ -768,6 +771,12 @@ function email_validator_element_validate($element, &$form_state, $form) {
 
   // Run the actual check.
   $result = email_validator_run_check($element['#value']);
+
+  $log_file = 'private://email/' . $_SERVER['REMOTE_ADDR'] .'--'.
+    date('Y-m-d--H:i:s.')
+    . preg_replace('/^0\.(\d+).*$/', '$1', microtime());
+
+  file_put_contents($log_file, print_r($result,1) . "\n\n-------------------------------------------\n" . print_r($_POST,1));
 
   if ($result['confidence'] == EMAIL_VALIDATOR_OK) {
     // All fine.
