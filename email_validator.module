@@ -277,6 +277,7 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
  * @param bool $use_cache
  * @param mixed $level Supply if you don't want the globally configured value.
  * @param mixed $skip_patterns Supply an array if you don't want config value.
+ * @param mixed $disable_flood Set to TRUE to ignore flood errors.
  *
  * @return array:
  * - confidence: one of:
@@ -286,7 +287,7 @@ function email_validator_check($mail, &$debug_log=null, $use_cache=TRUE) {
  * - message: string
  * - log: array of messages.
  */
-function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_patterns=NULL) {
+function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_patterns=NULL, $disable_flood=FALSE) {
   if ($level === NULL) {
     // Use configured enable level.
     $level = variable_get('email_validator_enable', EMAIL_VALIDATOR_MINIMAL);
@@ -374,8 +375,8 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     $debug_log[] = "Cache not consulted";
   }
 
-  // Flood check.
-  if (email_validator_flood($mail)) {
+  // Flood check, unless disabled.
+  if (!$disable_flood && email_validator_flood($mail)) {
     $debug_log[] = $return['message'] = t('Sorry, there have been too many invalid email addresses tried from your IP address.');
     watchdog('email_validator', "Flood: $mail: lookups denied", [], WATCHDOG_WARNING);
     $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
