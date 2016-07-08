@@ -540,7 +540,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     // In those cases, accept the email, but log a warning.
     $debug_log[] = "&#x2714; MAIL TO failed. (still accept).";
     watchdog('email_validator', "Unsure: $mail: Could not verify email address at host $host: $to (but accepted from user's POV)");
-    $debug_log[] = $msg = $return['message']($mail,$host, 6);
+    $debug_log[] = $msg = email_validator_result($mail,$host, 6);
     $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
     return $return;
   }
