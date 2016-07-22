@@ -323,6 +323,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     $debug_log[] = check_plain("$mail failed valid_email_address test");
     $debug_log[] = $return['message'] = t('Email address %mail is invalid', array('%mail'=>check_plain($mail)));
     $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    watchdog('email_validator', "Syntax invalid: '$mail'", [], WATCHDOG_WARNING);
     return $return;
   }
 
@@ -747,6 +748,13 @@ function email_validator_element_validate($element, &$form_state, $form) {
     // Required but not provided.
     form_error($element, t('This field is required.'));
     return;
+  }
+
+  // If the entered email contains spaces at the start/end, remove these now.
+  $_ = trim($element['#value']);
+  if ($element['#value'] != $_) {
+    require_once(__DIR__ . '/form_mangle_user_input.inc');
+    form_mangle_user_input($element, $_, $form_state);
   }
 
   if (isset($form_state['input']['email_validator_confirm'])) {
