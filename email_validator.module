@@ -435,6 +435,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   // SMTP responses may be multiple lines.
   // We have to read until we get a line like
   // "NNN ", ie. a response code followed by a space.
+  // Returned as string.
   $get_smtp_response = function($connect) use (&$debug_log) {
     $rcv ='';
     do {
@@ -514,7 +515,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   if (!preg_match('/^250 /m', $from))  {
     // Again, something went wrong before we could really test the address.
     // Be on the safe side and accept it.
-    $from = str_replace("\n", "<br/>\n", check_plain(implode("\n",$from)));
+    $from = str_replace("\n", "<br/>\n", check_plain($from));
     watchdog('email_validator', "Unsure: $mail: Could not verify email address at host $host: $from");
     $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got<pre>$from</pre>";
     $debug_log[] = $return['message'] = email_validator_result($mail,$host, 5);
@@ -530,7 +531,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
 
     // look out for greylisting
     if (preg_match('/gr[ea]y ?list/i', $to)) {
-      $to = str_replace("\n", "<br/>\n", check_plain(implode("\n",$to)));
+      $to = str_replace("\n", "<br/>\n", check_plain($to));
       $debug_log[] = "Greylisted, should be fine. Got: $to";
       watchdog('email_validator', "Unsure: $mail: Greylisting in operation at $host: $to");
       $debug_log[] = $return['message'] = email_validator_result($mail,$host, 6);
