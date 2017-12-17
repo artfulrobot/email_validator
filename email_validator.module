@@ -767,7 +767,7 @@ function email_validator_element_validate($element, &$form_state, $form) {
       form_error($element, t("Emails did not match"));
       EmailValidator::setFormRequiresConfirm($form, $element,
         "The emails did not match. Please re-check.");
-      watchdog('email_validator', "Failed Double Entry: {$element['#value']}, {$form_State['input']['email_validator_confirm']}", [], WATCHDOG_WARNING);
+      watchdog('email_validator', "Failed Double Entry: {$element['#value']}, {$form_state['input']['email_validator_confirm']}", [], WATCHDOG_WARNING);
       return;
     }
     watchdog('email_validator', "Confirmed by double entry: {$element['#value']}");
