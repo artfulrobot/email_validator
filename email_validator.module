@@ -29,15 +29,26 @@
  * Confidence EMAIL_VALIDATOR_OK
  */
 
+// These define how thorough the checks are.
 define('EMAIL_VALIDATOR_MINIMAL', 0);
 define('EMAIL_VALIDATOR_DNS', 1);
 define('EMAIL_VALIDATOR_FULL', 2);
+
+// These are the simplified confidence results.
 define('EMAIL_VALIDATOR_UNDELIVERABLE', 0);
 define('EMAIL_VALIDATOR_UNSURE', 1);
 define('EMAIL_VALIDATOR_OK', 2);
 
 class EmailValidator {
   public static $runtime_forms=[];
+  const RESULT_OK                    = 0;
+  // 1 I think is deprecated.
+  const RESULT_FAIL_INVALID_HOST     = 2;
+  const RESULT_FAIL_ACCESS_MX        = 3;
+  const RESULT_UNSURE_MAILTO_NOT_250 = 4;
+  const RESULT_UNSURE_SMTP           = 5;
+  const RESULT_UNSURE_MAILTO         = 6;
+  const RESULT_UNSURE_GREYLIST       = 7;
 
   public static function setFormRequiresConfirm($form, $element, $message) {
     // Store on runtime cache available to the #pre_render.
@@ -302,20 +313,25 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   elseif (!is_array($skip_patterns)) {
     throw new InvalidArgumentException('email_validator_run_check: If provided, $skip_patterns must be an array.');
   }
+
+  // Set up defaults.
   $return = [
     'confidence' => EMAIL_VALIDATOR_OK,
-    'message' => '',
-    'log' => [ "Checking: '$mail'" ],
+    'message'    => '',
+    'log'        => [ "Checking: '$mail'" ],
     ];
+
+  // We identify lots of detailed reasons why an email is valid or not but
+  // reduce these down to a confidence of OK, UNSURE, UNDELIVERABLE using this map:
   $confidence_map = [
-    0 => EMAIL_VALIDATOR_OK,
-    1 => EMAIL_VALIDATOR_OK,
-    2 => EMAIL_VALIDATOR_UNDELIVERABLE,
-    3 => EMAIL_VALIDATOR_UNSURE,
-    4 => EMAIL_VALIDATOR_UNSURE,
-    5 => EMAIL_VALIDATOR_UNSURE,
-    6 => EMAIL_VALIDATOR_UNSURE,
-    ];
+    EmailValidator::RESULT_OK                    => EMAIL_VALIDATOR_OK,
+    EmailValidator::RESULT_FAIL_INVALID_HOST     => EMAIL_VALIDATOR_UNDELIVERABLE,
+    EmailValidator::RESULT_FAIL_ACCESS_MX        => EMAIL_VALIDATOR_UNSURE, // perhaps we'll have better luck next time?
+    EmailValidator::RESULT_UNSURE_MAILTO_NOT_250 => EMAIL_VALIDATOR_UNSURE,
+    EmailValidator::RESULT_UNSURE_SMTP           => EMAIL_VALIDATOR_UNSURE,
+    EmailValidator::RESULT_UNSURE_MAILTO         => EMAIL_VALIDATOR_UNSURE,
+    EmailValidator::RESULT_UNSURE_GREYLIST       => EMAIL_VALIDATOR_OK,
+  ];
   $debug_log = &$return['log'];
 
   if (!valid_email_address($mail)) {
@@ -387,9 +403,9 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   // Let's see if we can find anything about this host in the DNS.
   if (!checkdnsrr($host, 'ANY')) {
     $debug_log[] = check_plain("checkdnsrr ANY failed for host '$host'");
-    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 2);
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_FAIL_INVALID_HOST);
     watchdog('email_validator', "Undeliverable: $mail: No DNS", [], WATCHDOG_WARNING);
-    $return['confidence'] = EMAIL_VALIDATOR_UNDELIVERABLE;
+    $return['confidence'] = $confidence_map[EmailValidator::RESULT_FAIL_INVALID_HOST];
     return $return;
   }
   $debug_log[] = "checkdnsrr ANY success";
@@ -397,11 +413,11 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   if ($level == EMAIL_VALIDATOR_DNS) {
     // Reached configured level.
     $debug_log[] = "&#x2714; SUCCESS (syntax, DNS).";
-    $return['message'] = email_validator_result($mail, $host, 0);
+    $return['message'] = email_validator_result($mail, $host, EmailValidator::RESULT_OK);
     return $return;
   }
   foreach ($skip_patterns as $pattern) {
-    $pattern = trim($pattern); 
+    $pattern = trim($pattern);
     if (!$pattern) {
       continue;
     }
@@ -410,7 +426,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
 
       // Everything is OK, so record success.
       $debug_log[] = "&#x2714; SUCCESS (syntax, DNS, skipped SMTP check).";
-      $return['message'] = email_validator_result($mail, $host, 0);
+      $return['message'] = email_validator_result($mail, $host, EmailValidator::RESULT_OK);
       return $return;
     }
   }
@@ -481,8 +497,8 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
 
   if (!$connect) {
     $debug_log[] = check_plain("Failed to connect to any MX for $mail");
-    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 3);
-    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_FAIL_ACCESS_MX);
+    $return['confidence'] = $confidence_map[EmailValidator::RESULT_FAIL_ACCESS_MX];
     return $return;
   }
 
@@ -518,8 +534,8 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     $from = str_replace("\n", "<br/>\n", check_plain($from));
     watchdog('email_validator', "Unsure: $mail: Could not verify email address at host $host: $from");
     $debug_log[] = "MAIL FROM did not give success (250) code. (we still allow this) Instead got<pre>$from</pre>";
-    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 5);
-    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_UNSURE_SMTP);
+    $return['confidence'] = $confidence_map[EmailValidator::RESULT_UNSURE_SMTP];
     return $return;
   }
 
@@ -534,30 +550,30 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
       $to = str_replace("\n", "<br/>\n", check_plain($to));
       $debug_log[] = "Greylisted, should be fine. Got: $to";
       watchdog('email_validator', "Unsure: $mail: Greylisting in operation at $host: $to");
-      $debug_log[] = $return['message'] = email_validator_result($mail,$host, 6);
-      $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+      $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_UNSURE_GREYLIST);
+      $return['confidence'] = $confidence_map[EmailValidator::RESULT_UNSURE_GREYLIST];
       return $return;
     }
 
     // In those cases, accept the email, but log a warning.
     $debug_log[] = "&#x2714; MAIL TO failed. (still accept).";
     watchdog('email_validator', "Unsure: $mail: Could not verify email address at host $host: $to (but accepted from user's POV)");
-    $debug_log[] = $msg = email_validator_result($mail,$host, 6);
-    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    $debug_log[] = $msg = email_validator_result($mail,$host, EmailValidator::RESULT_UNSURE_MAILTO);
+    $return['confidence'] = $confidence_map[EmailValidator::RESULT_UNSURE_MAILTO];
     return $return;
   }
 
   if (!preg_match("/^250 /m", $to)) {
     watchdog('email_validator', "Unsure: $mail: Rejected email address. Reason: $to");
     $debug_log[] = "MAIL TO did not give success (250) code. Instead got $to";
-    $debug_log[] = $return['message'] = email_validator_result($mail,$host, 4);
-    $return['confidence'] = EMAIL_VALIDATOR_UNSURE;
+    $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_UNSURE_MAILTO_NOT_250);
+    $return['confidence'] = $confidence_map[EmailValidator::RESULT_UNSURE_MAILTO_NOT_250];
     return $return;
   }
 
   // Everything is OK, so record success.
   $debug_log[] = "&#x2714; SUCCESS.";
-  $return['message'] = email_validator_result($mail,$host, 0);
+  $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_OK);
   return $return;
 }
 
@@ -698,6 +714,7 @@ function email_validator_demo_form() {
       '#tree' => TRUE, // for testing.
       '#type' => 'fieldset',
       '#title' => 'Demo fieldset',
+      '#description' => 'You can use real email addresses (no email is sent) or you can use unsure@example.com or ok@example.com or fail@example.com',
       'test_email' => array(
         '#type' => 'textfield',
         '#title' => t('Email'),
@@ -818,17 +835,19 @@ function email_validator_element_validate($element, &$form_state, $form) {
 function email_validator_code_translate($code, $mail, $host) {
 
   switch ($code) {
-    case 0: // perfecto
-    case 5: // Something went wrong in initial SMTP chat. Allow it.
-    case 6: // We were unable to obtain a definite YES, or NO. Allow it.
+    case EmailValidator::RESULT_OK: // perfecto
+    case EmailValidator::RESULT_UNSURE_SMTP: // Something went wrong in initial SMTP chat. Allow it.
+    case EmailValidator::RESULT_UNSURE_MAILTO: // We were unable to obtain a definite YES, or NO. Allow it.
+    case EmailValidator::RESULT_UNSURE_GREYLIST: // Greylisted. Allow it.
         return null;
     case 1:
-        return t('The email provider %host is not allowing this website to send it email.', array('%host'=>$host));
-    case 2:
+        // deprecated. Should be ok to remove this code.
+        return t('DEPRECATED: The email provider %host is not allowing this website to send it email.', array('%host'=>$host));
+    case EmailValidator::RESULT_FAIL_INVALID_HOST:
         return t('Email host %host invalid, please correct.', array('%host' => "$host"));
-    case 3:
+    case EmailValidator::RESULT_FAIL_ACCESS_MX:
         return t('Email host %host is not accepting email.', array('%host' => "$host"));
-    case 4:
+    case EmailValidator::RESULT_UNSURE_MAILTO_NOT_250:
         return t('The email server for %mail is not accepting our email. Could be wrong email, full inbox, or a blocking policy - could be a temporary problem.', array('%mail' => "$mail"));
     default:
         return;
