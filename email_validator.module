@@ -83,7 +83,7 @@ class EmailValidator {
           '#tree' => FALSE,
           '#type' => 'hidden',
           '#name' => 'email_validator_confirmed',
-          '#value' => $element['#value'],
+          '#value' => trim($element['#value']),
         ]];
     }
     else {
@@ -400,15 +400,34 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
     return $return;
   }
 
-  // Let's see if we can find anything about this host in the DNS.
-  if (!checkdnsrr($host, 'ANY')) {
-    $debug_log[] = check_plain("checkdnsrr ANY failed for host '$host'");
-    $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_FAIL_INVALID_HOST);
-    watchdog('email_validator', "Undeliverable: $mail: No DNS", [], WATCHDOG_WARNING);
-    $return['confidence'] = $confidence_map[EmailValidator::RESULT_FAIL_INVALID_HOST];
-    return $return;
+  // Skip DNS checks for the biggies...
+  if (in_array($host, [
+    'hotmail.com',
+    'hotmail.co.uk',
+    'gmail.com',
+    'ymail.com',
+    'outlook.com',
+    'mac.com',
+  ])) {
+    $debug_log[] = "dns_get_record skipped, domain belongs to a biggie";
   }
-  $debug_log[] = "checkdnsrr ANY success";
+  else {
+    // Let's see if we can find anything about this host in the DNS.
+    // According to https://www.php.net/dns_get_record DNS_ANY is faster but not always complete.
+    // However DNS_ALL sometimes fails, so we follow up with DNS_ANY in those cases.
+    $dns_records = dns_get_record("$host.", DNS_ALL);
+    if (!$dns_records) {
+      $dns_records = dns_get_record("$host.", DNS_ANY);
+    }
+    if (!$dns_records) {
+      $debug_log[] = check_plain("dns_get_record DNS_ALL failed for host '$host.'");
+      $debug_log[] = $return['message'] = email_validator_result($mail,$host, EmailValidator::RESULT_FAIL_INVALID_HOST);
+      watchdog('email_validator', "Undeliverable: $mail: No DNS", [], WATCHDOG_WARNING);
+      $return['confidence'] = $confidence_map[EmailValidator::RESULT_FAIL_INVALID_HOST];
+      return $return;
+    }
+    $debug_log[] = "dns_get_record DNS_ALL success";
+  }
 
   if ($level == EMAIL_VALIDATOR_DNS) {
     // Reached configured level.
@@ -469,9 +488,11 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   };
 
   // Try to connect to one SMTP server.
+  $connect = NULL;
   foreach ($mx_ips as $smtp=>$hostname) {
     $debug_log[] = check_plain("Trying MX $smtp for $hostname");
 
+    $errno = $errstr = NULL;
     $connect = @fsockopen($smtp, 25, $errno, $errstr, 15);
 
     if (!$connect) {
@@ -505,6 +526,7 @@ function email_validator_run_check($mail, $use_cache=TRUE, $level=NULL, $skip_pa
   $from = variable_get('email_validator_returnpath',
                 variable_get('site_mail', ini_get('sendmail_from')));
   // Extract the <...> part, if there is one.
+  $match = NULL;
   if (preg_match('/\<(.*)\>/', $from, $match) > 0) {
     $from = $match[1];
   }
@@ -778,19 +800,19 @@ function email_validator_element_validate($element, &$form_state, $form) {
   if (isset($form_state['input']['email_validator_confirm'])) {
     // Confirm field is sent.
     // User has provided a 2nd email.
-    if ($form_state['input']['email_validator_confirm'] != $element['#value']) {
+    if (trim($form_state['input']['email_validator_confirm']) != $element['#value']) {
       // The user-entered 2nd version didn't match.
       // Don't do any further checking now.
       form_error($element, t("Emails did not match"));
       EmailValidator::setFormRequiresConfirm($form, $element,
         "The emails did not match. Please re-check.");
-      watchdog('email_validator', "Failed Double Entry: {$element['#value']}, {$form_state['input']['email_validator_confirm']}", [], WATCHDOG_WARNING);
+      watchdog('email_validator', "Failed Double Entry: '{$element['#value']}', '{$form_state['input']['email_validator_confirm']}'", [], WATCHDOG_WARNING);
       return;
     }
     watchdog('email_validator', "Confirmed by double entry: {$element['#value']}");
   }
   if (isset($form_state['input']['email_validator_confirmed'])
-    && $form_state['input']['email_validator_confirmed'] == $element['#value']) {
+    && trim($form_state['input']['email_validator_confirmed']) == $element['#value']) {
       // User has previously confirmed this value. All good.
       EmailValidator::previouslyConfirmed($form, $element);
       return;
